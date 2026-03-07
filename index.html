@@ -695,12 +695,15 @@ tr:hover td{background:var(--bg3);}
         <div class="field"><label>E-mail</label><input id="s_email"></div>
         <div class="field"><label>Administrationsgebyr bøder (DKK)</label><input id="s_gebyr" type="number" placeholder="500"></div>
         <div class="field" style="grid-column:1/-1">
-          <label>🔑 MotorAPI nøgle <a href="https://www.motorapi.dk" target="_blank" style="color:var(--accent);font-size:.8rem">(hent gratis på motorapi.dk)</a></label>
+          <label>🔌 Nummerplade opslag — Cloudflare Worker URL</label>
           <div style="display:flex;gap:8px">
-            <input id="s_motorapi" type="text" placeholder="Din API-nøgle" style="flex:1">
-            <button class="btn btn-blue btn-sm" onclick="saveMotorApiKey()">Gem nøgle</button>
+            <input id="s_motorapi" type="text" placeholder="https://din-worker.din-bruger.workers.dev" style="flex:1">
+            <button class="btn btn-blue btn-sm" onclick="saveMotorApiKey()">Gem</button>
           </div>
-          <div style="font-size:.78rem;color:var(--text2);margin-top:4px">Bruges til auto-udfyldning af biloplysninger fra nummerplade. Gratis op til 3.000 opslag/måned.</div>
+          <div style="font-size:.78rem;color:var(--text2);margin-top:4px">
+            Opsæt én gang: 1) Opret gratis konto på <a href="https://workers.cloudflare.com" target="_blank" style="color:var(--accent)">workers.cloudflare.com</a> 
+            2) Opret ny Worker 3) Indsæt koden nedenfor 4) Tilføj dit motorapi.dk API-nøgle som miljøvariabel MOTOR_API_KEY 5) Indsæt Worker-URL her
+          </div>
         </div>
       </div>
       <button class="btn btn-accent mt-8" onclick="saveSettings()">Gem indstillinger</button>
@@ -1812,21 +1815,21 @@ function lookupVehicle(){
   const raw=(document.getElementById('vm_lookup_reg').value||'').replace(/\s/g,'').toUpperCase();
   if(!raw){showToast('Indtast nummerplade først','error');return;}
   
-  // Hent gemt API-nøgle
-  const apiKey=(localStorage.getItem('motorapi_key')||'').trim();
-  if(!apiKey){
-    // Bed om API-nøgle første gang
-    const key=prompt('Indtast din MotorAPI nøgle (gratis på motorapi.dk):','');
-    if(!key){return;}
-    localStorage.setItem('motorapi_key',key.trim());
+  // Tjek at proxy-URL er sat (Cloudflare Worker)
+  const proxyBase=(localStorage.getItem('motorapi_proxy')||'').trim();
+  if(!proxyBase){
+    const url=prompt('Indtast din Cloudflare Worker URL (se vejledning i Indstillinger):','https://din-worker.din-bruger.workers.dev');
+    if(!url||!url.startsWith('http')){return;}
+    localStorage.setItem('motorapi_proxy',url.trim().replace(/\/$/,''));
   }
   
-  const key=(localStorage.getItem('motorapi_key')||'').trim();
+  const proxy=(localStorage.getItem('motorapi_proxy')||'').trim().replace(/\/$/,'');
   const statusEl=document.getElementById('vm_lookup_status');
   statusEl.textContent='⏳ Henter biloplysninger...';
   statusEl.style.color='var(--accent)';
   
-  fetch('https://nummerplade.aaronmsultan.workers.dev/'+encodeURIComponent(raw))
+  // Kald din Cloudflare Worker (har CORS headers + videresender til motorapi.dk)
+  fetch(proxy+'/'+encodeURIComponent(raw))
   .then(r=>{
     if(r.status===401){throw new Error('Ugyldig API-nøgle — gå til motorapi.dk og tjek din nøgle');}
     if(r.status===404){throw new Error('Nummerplade ikke fundet i motorregistret');}
@@ -2092,17 +2095,17 @@ async function uploadLocalToFb(){
 }
 
 function saveMotorApiKey(){
-  const key=(document.getElementById('s_motorapi')||{}).value||'';
-  if(key.trim()){localStorage.setItem('motorapi_key',key.trim());showToast('API-nøgle gemt','success');}
-  else{localStorage.removeItem('motorapi_key');showToast('API-nøgle slettet','success');}
+  const val=(document.getElementById('s_motorapi')||{}).value||'';
+  if(val.trim()){localStorage.setItem('motorapi_proxy',val.trim().replace(/\/$/,''));showToast('Worker URL gemt','success');}
+  else{localStorage.removeItem('motorapi_proxy');showToast('Worker URL slettet','success');}
 }
 
 function loadSettings(){
   const s=getData('settings',{});
   document.getElementById('s_name').value=s.name||'';
-  const savedKey=localStorage.getItem('motorapi_key')||'';
+  const savedProxy=localStorage.getItem('motorapi_proxy')||'';
   const motorApiEl=document.getElementById('s_motorapi');
-  if(motorApiEl)motorApiEl.value=savedKey;document.getElementById('s_cvr').value=s.cvr||'';
+  if(motorApiEl)motorApiEl.value=savedProxy;document.getElementById('s_cvr').value=s.cvr||'';
   document.getElementById('s_addr').value=s.addr||'';document.getElementById('s_city').value=s.city||'';
   document.getElementById('s_phone').value=s.phone||'';document.getElementById('s_email').value=s.email||'';
   const gebEl=document.getElementById('s_gebyr');if(gebEl)gebEl.value=s.gebyr||'500';
