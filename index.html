@@ -756,6 +756,19 @@ tr:hover td{background:var(--bg3);}
     <h3 id="vModalTitle">Tilføj Bil</h3>
     <input type="hidden" id="v_editId">
 
+    <!-- DMR Opslag -->
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:20px">
+      <div style="font-family:'Barlow Condensed',sans-serif;font-size:.85rem;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">🔍 DMR Opslag — Hent bildata automatisk</div>
+      <div style="display:flex;gap:10px;align-items:flex-end">
+        <div class="field" style="flex:1;margin:0">
+          <label>Nummerplade</label>
+          <input id="dmr_plate" placeholder="AB12345" style="text-transform:uppercase;font-weight:700;letter-spacing:2px;font-size:1.1rem" maxlength="10" onkeydown="if(event.key==='Enter'){event.preventDefault();dmrLookup();}">
+        </div>
+        <button class="btn btn-accent" onclick="dmrLookup()" id="dmrBtn" style="height:42px;white-space:nowrap">Hent fra DMR <span id="dmrSpinner" style="display:none" class="spinner"></span></button>
+      </div>
+      <div id="dmrStatus" style="font-size:.82rem;margin-top:8px;min-height:18px;color:var(--text2)"></div>
+    </div>
+
     <div class="grid2">
       <div class="field"><label>Mærke *</label><input id="vm_brand" placeholder="F.eks. Mercedes"></div>
       <div class="field"><label>Model *</label><input id="vm_model" placeholder="F.eks. Sprinter"></div>
@@ -1784,9 +1797,17 @@ function openVehicleModal(id){
   document.getElementById('vModalTitle').textContent=id?'Rediger Bil':'Tilføj Bil';
   document.getElementById('v_editId').value=id||'';
   ['brand','model','reg','year','color','vin','km','fuel','payload','price','notes'].forEach(f=>document.getElementById('vm_'+f).value='');
+  // Ryd DMR-opslag felter
+  document.getElementById('dmr_plate').value='';
+  document.getElementById('dmrStatus').textContent='';
+  document.getElementById('dmrSpinner').style.display='none';
+  document.getElementById('dmrBtn').disabled=false;
   if(id){
     const v=getData('vehicles').find(x=>x.id===id);
-    if(v)['brand','model','reg','year','color','vin','km','fuel','payload','price','notes'].forEach(f=>document.getElementById('vm_'+f).value=v[f]||'');
+    if(v){
+      ['brand','model','reg','year','color','vin','km','fuel','payload','price','notes'].forEach(f=>document.getElementById('vm_'+f).value=v[f]||'');
+      document.getElementById('dmr_plate').value=v.reg||'';
+    }
   }
   openModal('vehicleModal');
 }
@@ -1811,6 +1832,86 @@ function saveVehicle(){
   setData('vehicles',vehicles);closeModal('vehicleModal');renderVehicles();populateVehicleSelect();
   showToast('Bil gemt','success');
 }
+
+// ── DMR OPSLAG ──────────────────────────────────
+var DMR_API_KEY = '8ct1nfdkhzy8aiadld12cn8qp6pkqh3f';
+var DMR_API_BASE = 'https://v1.motorapi.dk';
+
+function dmrLookup(){
+  var plateInput = document.getElementById('dmr_plate');
+  var plate = plateInput.value.trim().toUpperCase().replace(/\s+/g,'');
+  if(!plate){ showToast('Indtast en nummerplade','error'); return; }
+
+  var btn = document.getElementById('dmrBtn');
+  var spinner = document.getElementById('dmrSpinner');
+  var status = document.getElementById('dmrStatus');
+
+  btn.disabled = true;
+  spinner.style.display = 'inline-block';
+  status.style.color = 'var(--accent)';
+  status.textContent = 'Henter data fra DMR...';
+
+  fetch(DMR_API_BASE + '/vehicles/' + encodeURIComponent(plate), {
+    method: 'GET',
+    headers: { 'X-AUTH-TOKEN': DMR_API_KEY, 'Accept': 'application/json' }
+  })
+  .then(function(resp){
+    if(!resp.ok){
+      if(resp.status === 404) throw new Error('Nummerplade ikke fundet i DMR');
+      if(resp.status === 401) throw new Error('Ugyldig API-nøgle');
+      if(resp.status === 429) throw new Error('For mange opslag — prøv igen senere');
+      throw new Error('Fejl fra DMR API (HTTP ' + resp.status + ')');
+    }
+    return resp.json();
+  })
+  .then(function(data){
+    // Udfyld felter automatisk
+    if(data.make) document.getElementById('vm_brand').value = data.make;
+    if(data.model) document.getElementById('vm_model').value = data.model;
+    if(data.registration_number) document.getElementById('vm_reg').value = data.registration_number;
+    if(data.model_year) document.getElementById('vm_year').value = data.model_year;
+    if(data.color) document.getElementById('vm_color').value = data.color;
+    if(data.vin) document.getElementById('vm_vin').value = data.vin;
+    if(data.fuel_type){
+      var fuelMap = {'Diesel':'Diesel','Benzin':'Benzin','El':'El','Hybrid':'Hybrid'};
+      var fuelSel = document.getElementById('vm_fuel');
+      // Prøv at matche brændstoftype
+      for(var i=0; i<fuelSel.options.length; i++){
+        if(data.fuel_type.toLowerCase().indexOf(fuelSel.options[i].value.toLowerCase()) >= 0){
+          fuelSel.selectedIndex = i; break;
+        }
+      }
+    }
+
+    // Vis succes-info
+    var info = [data.make, data.model, data.variant].filter(Boolean).join(' ');
+    var statusText = (data.status || '') + (data.model_year ? ' · ' + data.model_year : '') + (data.color ? ' · ' + data.color : '');
+    status.style.color = 'var(--green)';
+    status.innerHTML = '✅ <b>' + info + '</b><br><span style="font-size:.78rem;color:var(--text2)">' + statusText + '</span>';
+
+    // Highlight udfyldte felter med kort animation
+    ['vm_brand','vm_model','vm_reg','vm_year','vm_color','vm_vin','vm_fuel'].forEach(function(fid){
+      var el = document.getElementById(fid);
+      if(el && el.value){
+        el.style.borderColor = 'var(--green)';
+        el.style.transition = 'border-color .3s';
+        setTimeout(function(){ el.style.borderColor = ''; }, 2000);
+      }
+    });
+
+    btn.disabled = false;
+    spinner.style.display = 'none';
+    showToast('DMR data hentet for ' + plate, 'success');
+  })
+  .catch(function(err){
+    status.style.color = 'var(--red)';
+    status.textContent = '❌ ' + (err.message || 'Kunne ikke hente data');
+    btn.disabled = false;
+    spinner.style.display = 'none';
+  });
+}
+// ── /DMR OPSLAG ─────────────────────────────────
+
 function deleteVehicle(id){
   const v=getData('vehicles').find(x=>x.id===id);
   if(v&&v.status==='rented'){showToast('Bil er udlejet — afslut kontrakten først','error');return;}
