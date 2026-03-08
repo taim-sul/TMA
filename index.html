@@ -180,7 +180,7 @@ fbInit();
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:'Barlow',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;}
-::-webkit-scrollbar{width:6px;};:-webkit-scrollbar-track{background:var(--bg2);}
+::-webkit-scrollbar{width:6px;}::-webkit-scrollbar-track{background:var(--bg2);}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
 
 /* LOGIN */
@@ -1106,12 +1106,17 @@ function activateApp(user){
   loadSettings(); renderDashboard(); renderVehicles(); renderContracts(); setTimeout(btMigrateOldPhotos, 3000);
   renderDrivers(); populateDriverSelect(); populateVehicleSelect(); btLoadChecks();
 }
+function _hashSession(u,p){
+  // Simpel hash — ikke kryptografisk sikker, men bedre end klartekst
+  var s=u+':'+p;var h=0;for(var i=0;i<s.length;i++){h=((h<<5)-h)+s.charCodeAt(i);h|=0;}
+  return 'sess_'+Math.abs(h).toString(36);
+}
 function doLogin(){
   const u=document.getElementById('loginUser').value.trim();
   const p=document.getElementById('loginPass').value;
   const user=getData('users').find(x=>x.username===u&&x.password===p);
   if(!user){document.getElementById('loginErr').style.display='block';return;}
-  localStorage.setItem('pua_session',JSON.stringify({username:user.username,password:user.password}));
+  localStorage.setItem('pua_session',JSON.stringify({username:user.username,token:_hashSession(u,p)}));
   activateApp(user);
 }
 function doLogout(){
@@ -1127,7 +1132,7 @@ function tryAutoLogin(){
   try{
     const sess=JSON.parse(localStorage.getItem('pua_session'));
     if(!sess) return false;
-    const user=getData('users').find(x=>x.username===sess.username&&x.password===sess.password);
+    const user=getData('users').find(x=>x.username===sess.username&&_hashSession(x.username,x.password)===sess.token);
     if(!user){localStorage.removeItem('pua_session');return false;}
     activateApp(user); return true;
   }catch{return false;}
@@ -1436,8 +1441,10 @@ function finalizeContract(){
   const sigL=document.getElementById('sigLessor').toDataURL();
   const sigD=document.getElementById('sigLessee').toDataURL();
   const id='C'+Date.now();
+  const existingContracts=getData('contracts');
+  const maxNum=existingContracts.reduce((max,c)=>{const n=parseInt((c.num||'').replace('K-',''));return n>max?n:max;},0);
   const contract={
-    id,num:'K-'+String(getData('contracts').length+1).padStart(4,'0'),
+    id,num:'K-'+String(maxNum+1).padStart(4,'0'),
     created:new Date().toISOString(),status:'active',
     lessor:{
       name:document.getElementById('u_name').value,
@@ -1532,7 +1539,7 @@ function buildContractHTML(c){
       `).join('')}
     </table>`:'';
 
-  return `<div class="contract-paper" id="printArea">
+  return `<div class="contract-paper contract-print-area">
     <h2>${udlejerNavn}</h2>
     <div class="c-sub">UDLEJNINGSKONTRAKT</div>
     <table><tr><th colspan="4" style="background:#0a1628;color:#e8a020;text-align:center">KONTRAKTNUMMER: ${c.num} &nbsp;|&nbsp; DATO: ${fmtDT(c.created)}</th></tr></table>
@@ -1589,7 +1596,8 @@ function fmtD(s){if(!s)return'—';const d=new Date(s);if(isNaN(d))return s;retu
 //  PRINT + EMAIL (PDF vedhæftet)
 // ════════════════════════════════════════════════
 function printContract(){
-  const html=document.getElementById('printArea')?document.getElementById('printArea').outerHTML:buildContractHTML(currentContractData);
+  const printEl=document.querySelector('.contract-print-area');
+  const html=printEl?printEl.outerHTML:buildContractHTML(currentContractData);
   const fullHtml='<!DOCTYPE html><html><head><meta charset="UTF-8"><style>body{font-family:Arial,sans-serif;margin:20px}table{border-collapse:collapse;width:100%}table td,table th{border:1px solid #ccc;padding:6px;font-size:12px}h2{text-align:center}.sig-block{display:flex;gap:24px;margin-top:24px}.sig-line{flex:1;border-top:1px solid #333;padding-top:6px}</style></head><body>'+html+'<scr'+'ipt>window.onload=function(){window.print()}<'+'/scr'+'ipt></body></html>';
   const blob=new Blob([fullHtml],{type:'text/html'});
   const url=URL.createObjectURL(blob);
@@ -1626,51 +1634,78 @@ function emailContractById(){
 }
 
 async function whatsappContract(){
-  const c=currentContractData;
+  var c=currentContractData;
   if(!c||!c.driver){showToast('Ingen kontrakt at sende','error');return;}
-  showToast('Genererer PDF...','success');
+
+  var phone=(c.driver.phone||'').replace(/\D/g,'');
+  // Tilføj landekode 45 hvis det er et dansk nummer uden landekode
+  if(phone && phone.length<=8) phone='45'+phone;
+  var contractNum=c.num||'';
+  var driverName=c.driver.name||'';
+  var vehicleInfo=(c.vehicle?c.vehicle.brand+' '+c.vehicle.model+' ('+c.vehicle.reg+')':'Bil');
+  var pickupDate=c.rental&&c.rental.pickup?new Date(c.rental.pickup).toLocaleDateString('da-DK'):'';
+  var returnDate=c.rental&&c.rental.return?new Date(c.rental.return).toLocaleDateString('da-DK'):'';
+
+  var msg='Hej '+driverName+',\n\n'
+    +'Her er din udlejningskontrakt:\n'
+    +'📋 Kontrakt: '+contractNum+'\n'
+    +'🚐 Bil: '+vehicleInfo+'\n'
+    +'📅 Periode: '+pickupDate+' → '+returnDate+'\n\n'
+    +'Med venlig hilsen';
+
+  // Prøv først at generere PDF og dele via Web Share API (mobil)
+  var pdfShared=false;
   try{
-    // Render contract HTML to PDF via html2canvas + jsPDF
-    const {jsPDF}=window.jspdf;
-    const contractEl=document.getElementById('printArea')||createTempContractEl(c);
-    const canvas=await html2canvas(contractEl,{scale:2,useCORS:true,backgroundColor:'#ffffff'});
-    const imgData=canvas.toDataURL('image/jpeg',0.92);
-    const pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
-    const pdfW=pdf.internal.pageSize.getWidth();
-    const pdfH=(canvas.height*pdfW)/canvas.width;
-    // Split across pages if needed
-    const pageH=pdf.internal.pageSize.getHeight();
-    let yPos=0;
-    while(yPos<pdfH){
-      if(yPos>0)pdf.addPage();
-      pdf.addImage(imgData,'JPEG',0,-yPos,pdfW,pdfH);
-      yPos+=pageH;
-    }
-    const pdfBlob=pdf.output('blob');
-    const pdfFile=new File([pdfBlob],'Kontrakt-'+c.num+'.pdf',{type:'application/pdf'});
-    // Try Web Share API (works on mobile - shows native share sheet incl. WhatsApp)
-    if(navigator.canShare&&navigator.canShare({files:[pdfFile]})){
-      await navigator.share({
-        files:[pdfFile],
-        title:'Udlejningskontrakt '+c.num,
-        text:'Kære '+c.driver.name+', vedhæftet er din udlejningskontrakt '+c.num+'.'
-      });
-    } else {
-      // Fallback: download PDF + åbn WhatsApp chat
-      const url=URL.createObjectURL(pdfFile);
-      const a=document.createElement('a');a.href=url;a.download='Kontrakt-'+c.num+'.pdf';
-      document.body.appendChild(a);a.click();document.body.removeChild(a);
-      setTimeout(()=>URL.revokeObjectURL(url),10000);
-      // Åbn WhatsApp med besked (uden fil - ikke understøttet i browser)
-      const phone=(c.driver.phone||'').replace(/\D/g,'');
-      const msg=encodeURIComponent('Hej '+c.driver.name+', jeg har netop downloadet din udlejningskontrakt '+c.num+'. Vedhæft venligst filen i denne chat.');
-      const waUrl=phone?'https://wa.me/45'+phone+'?text='+msg:'https://wa.me/?text='+msg;
-      setTimeout(()=>window.open(waUrl,'_blank'),800);
-      showToast('PDF downloadet — send den manuelt via WhatsApp','success');
+    if(window.jspdf && typeof html2canvas==='function'){
+      showToast('Genererer PDF...','success');
+      var jsPDF=window.jspdf.jsPDF;
+      var contractEl=document.querySelector('.contract-print-area')||createTempContractEl(c);
+      var canvas=await html2canvas(contractEl,{scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false});
+      var imgData=canvas.toDataURL('image/jpeg',0.92);
+      var pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+      var pdfW=pdf.internal.pageSize.getWidth();
+      var pdfH=(canvas.height*pdfW)/canvas.width;
+      var pageH=pdf.internal.pageSize.getHeight();
+      var yPos=0;
+      while(yPos<pdfH){
+        if(yPos>0)pdf.addPage();
+        pdf.addImage(imgData,'JPEG',0,-yPos,pdfW,pdfH);
+        yPos+=pageH;
+      }
+      var pdfBlob=pdf.output('blob');
+      var pdfFile=new File([pdfBlob],'Kontrakt-'+contractNum+'.pdf',{type:'application/pdf'});
+
+      // Prøv Web Share API med fil (fungerer på mobil)
+      if(navigator.canShare && navigator.canShare({files:[pdfFile]})){
+        await navigator.share({
+          files:[pdfFile],
+          title:'Udlejningskontrakt '+contractNum,
+          text:msg
+        });
+        pdfShared=true;
+      } else {
+        // Download PDF og åbn WhatsApp separat
+        var url=URL.createObjectURL(pdfFile);
+        var a=document.createElement('a');a.href=url;a.download='Kontrakt-'+contractNum+'.pdf';
+        document.body.appendChild(a);a.click();document.body.removeChild(a);
+        setTimeout(function(){URL.revokeObjectURL(url);},10000);
+        showToast('PDF downloadet — åbner WhatsApp...','success');
+      }
     }
   }catch(err){
-    console.error('WhatsApp PDF error:',err);
-    showToast('Fejl ved PDF-generering: '+err.message,'error');
+    console.warn('WhatsApp PDF fejl (bruger fallback):',err);
+  }
+
+  // Åbn WhatsApp med besked (hvis PDF ikke blev delt via Web Share)
+  if(!pdfShared){
+    var waMsg=encodeURIComponent(msg);
+    var waUrl=phone?'https://wa.me/'+phone+'?text='+waMsg:'https://wa.me/?text='+waMsg;
+    var waWin=window.open(waUrl,'_blank');
+    // Fallback hvis popup blev blokeret
+    if(!waWin){
+      window.location.href=waUrl;
+    }
+    showToast('WhatsApp åbnet','success');
   }
 }
 function createTempContractEl(c){
@@ -1873,7 +1908,6 @@ function dmrLookup(){
     if(data.color) document.getElementById('vm_color').value = data.color;
     if(data.vin) document.getElementById('vm_vin').value = data.vin;
     if(data.fuel_type){
-      var fuelMap = {'Diesel':'Diesel','Benzin':'Benzin','El':'El','Hybrid':'Hybrid'};
       var fuelSel = document.getElementById('vm_fuel');
       // Prøv at matche brændstoftype
       for(var i=0; i<fuelSel.options.length; i++){
@@ -2391,7 +2425,13 @@ function btEditCheck(id){
   // Restore check buttons
   document.querySelectorAll('.check-toggle button').forEach(b=>b.className='');
   Object.entries(btChecks).forEach(([key,val])=>{
-    const checkItem=document.querySelector(`[onclick*="setCheck('${key}'"]`);
+    document.querySelectorAll('.check-toggle button').forEach(b=>{
+      const onc=b.getAttribute('onclick')||'';
+      if(onc.indexOf("setCheck('"+key+"'")>=0){
+        var bVal=b.textContent.trim().toLowerCase()==='ok'?'ok':b.textContent.trim().toLowerCase()==='nej'?'nej':'na';
+        if(bVal===val) b.classList.add(val);
+      }
+    });
   });
   openModal('btCheckModal');
 }
