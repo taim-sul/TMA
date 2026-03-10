@@ -396,7 +396,7 @@ tr:hover td{background:var(--bg3);}
       </div>
     </div>
   </div>
-  <div style="color:var(--text3);font-size:.75rem;margin-top:20px;">Standard admin: admin / TMA123</div>
+  <div style="color:var(--text3);font-size:.75rem;margin-top:20px;">Standard login: <b style="color:var(--accent)">admin</b> / <b style="color:var(--accent)">TMA123</b></div>
 </div>
 
 <!-- APP -->
@@ -871,7 +871,20 @@ function setData(k,v){
 }
 
 function initDefaults(){
-  if(!STORE.get('users')) setData('users',[{id:'1',username:'admin',name:'Administrator',password:'TMA123',role:'admin'}]);
+  if(!STORE.get('users')){
+    setData('users',[{id:'1',username:'admin',name:'Administrator',password:'TMA123',role:'admin'}]);
+  } else {
+    // Migration: if admin user has a legacy/unknown password, reset to TMA123
+    // This handles old sessions from previous versions
+    const users = getData('users');
+    const admin = users.find(u=>u.username==='admin');
+    const knownLegacyPasswords = ['pilot2024','Pilot2024','pilot','admin','1234','12345'];
+    if(admin && knownLegacyPasswords.includes(admin.password)){
+      admin.password = 'TMA123';
+      setData('users', users);
+      console.log('[TML] Admin adgangskode nulstillet til standard: TMA123');
+    }
+  }
   if(!STORE.get('settings')) setData('settings',{name:'Trust Move Udlejning',cvr:'',addr:'',city:'',phone:'',email:'',gebyr:'500'});
 }
 initDefaults();
@@ -1466,35 +1479,106 @@ function printContractById(){
   if(c){currentContractData=c;printContract();}
 }
 
-function emailContract(){
+async function emailContract(){
   const c=currentContractData;
   if(!c||!c.driver)return;
-  const html=buildContractHTML(c);
-  // Åbn print-dialog via blob URL (virker på mobil uden popup-blokering)
-  const style='body{font-family:Arial,sans-serif;margin:20px}table{border-collapse:collapse;width:100%}table td,table th{border:1px solid #ccc;padding:6px;font-size:11px}h2{text-align:center}.sig-block{display:flex;gap:24px;margin-top:24px}.sig-line{flex:1;border-top:1px solid #333;padding-top:6px}.contract-paper{padding:20px}';
-  const fullHtml='<!DOCTYPE html><html><head><meta charset="UTF-8"><style>'+style+'</style></head><body>'+html+'</body></html>';
-  const blob=new Blob([fullHtml],{type:'text/html'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener';
-  document.body.appendChild(a);a.click();document.body.removeChild(a);
-  setTimeout(()=>URL.revokeObjectURL(url),10000);
-  // Åbn mail-klient separat
-  const mailBody=encodeURIComponent('Kære '+c.driver.name+',\n\nVedhæft venligst kontrakten.\n\nKontraktnummer: '+c.num+'\nBil: '+c.vehicle.brand+' '+c.vehicle.model+' ('+c.vehicle.reg+')\nPeriode: '+fmtDT(c.rental.pickup)+' - '+fmtDT(c.rental.return)+'\n\nMed venlig hilsen\n'+c.lessor.name);
-  const mailSubject=encodeURIComponent('Udlejningskontrakt '+c.num);
-  setTimeout(()=>{window.location.href='mailto:'+encodeURIComponent(c.driver.email)+'?subject='+mailSubject+'&body='+mailBody;},500);
-  showToast('Kontrakt åbnet — gem som PDF og vedhæft i mail','success');
+  const contractNum=c.num||'';
+  const driverEmail=c.driver.email||'';
+  const sett=getData('settings',{});
+
+  showToast('Genererer PDF...','success');
+
+  try{
+    // Generate PDF
+    const pdfBlob = await generateContractPDF(c, contractNum);
+    const pdfFile = new File([pdfBlob], 'Kontrakt-'+contractNum+'.pdf', {type:'application/pdf'});
+
+    // Try Web Share API first (mobile - can pick mail app directly)
+    if(navigator.canShare && navigator.canShare({files:[pdfFile]})){
+      try{
+        await navigator.share({
+          files:[pdfFile],
+          title:'Udlejningskontrakt '+contractNum,
+          text:'Udlejningskontrakt '+contractNum+' til '+c.driver.name
+        });
+        showToast('Kontrakt delt ✅','success');
+        return;
+      }catch(shareErr){
+        if(shareErr.name!=='AbortError') console.warn('Share fejl:',shareErr);
+      }
+    }
+
+    // Desktop: auto-download PDF + open mailto
+    const url=URL.createObjectURL(pdfBlob);
+    const a=document.createElement('a');
+    a.href=url; a.download='Kontrakt-'+contractNum+'.pdf';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 15000);
+
+    // Build mailto with instructions
+    const mailBody=encodeURIComponent(
+      'Kære '+c.driver.name+',\n\n'
+      +'Vedhæftet finder du din udlejningskontrakt.\n\n'
+      +'Kontraktnummer: '+contractNum+'\n'
+      +'Bil: '+c.vehicle.brand+' '+c.vehicle.model+' ('+c.vehicle.reg+')\n'
+      +'Periode: '+fmtDT(c.rental.pickup)+' → '+fmtDT(c.rental.return)+'\n\n'
+      +'Med venlig hilsen\n'+(sett.name||'Trust Move Udlejning')
+    );
+    const mailSubject=encodeURIComponent('Udlejningskontrakt '+contractNum+' — '+c.driver.name);
+
+    setTimeout(()=>{
+      window.location.href='mailto:'+encodeURIComponent(driverEmail)+'?subject='+mailSubject+'&body='+mailBody;
+      showToast('PDF downloadet — vedhæft den i mail-vinduet','success');
+    }, 600);
+
+  }catch(err){
+    console.warn('Email PDF fejl:',err);
+    // Fallback: just open mailto without PDF
+    const mailBody=encodeURIComponent('Kære '+c.driver.name+',\n\nHer er din udlejningskontrakt nr. '+contractNum+'.');
+    const mailSubject=encodeURIComponent('Udlejningskontrakt '+contractNum);
+    window.location.href='mailto:'+encodeURIComponent(driverEmail)+'?subject='+mailSubject+'&body='+mailBody;
+  }
 }
 function emailContractById(){
   const c=getData('contracts').find(x=>x.id===currentContractId);
   if(c){currentContractData=c;emailContract();}
 }
 
+// ── Fælles PDF-generator til WA + email ────────────────
+async function generateContractPDF(c, contractNum){
+  if(!window.jspdf || typeof html2canvas !== 'function'){
+    throw new Error('jsPDF eller html2canvas ikke indlæst');
+  }
+  const jsPDF = window.jspdf.jsPDF;
+  const contractEl = createTempContractEl(c);
+  // Wait for element to render
+  await new Promise(r => setTimeout(r, 150));
+  const canvas = await html2canvas(contractEl, {
+    scale: 2,
+    useCORS: true,
+    backgroundColor: '#ffffff',
+    logging: false
+  });
+  const imgData = canvas.toDataURL('image/jpeg', 0.92);
+  const pdf = new jsPDF({orientation:'portrait', unit:'mm', format:'a4'});
+  const pdfW = pdf.internal.pageSize.getWidth();
+  const pdfH = (canvas.height * pdfW) / canvas.width;
+  const pageH = pdf.internal.pageSize.getHeight();
+  let yPos = 0;
+  while(yPos < pdfH){
+    if(yPos > 0) pdf.addPage();
+    pdf.addImage(imgData, 'JPEG', 0, -yPos, pdfW, pdfH);
+    yPos += pageH;
+  }
+  return pdf.output('blob');
+}
+
+
 async function whatsappContract(){
   var c=currentContractData;
   if(!c||!c.driver){showToast('Ingen kontrakt at sende','error');return;}
 
   var phone=(c.driver.phone||'').replace(/\D/g,'');
-  // Tilføj landekode 45 hvis det er et dansk nummer uden landekode
   if(phone && phone.length<=8) phone='45'+phone;
   var contractNum=c.num||'';
   var driverName=c.driver.name||'';
@@ -1503,65 +1587,58 @@ async function whatsappContract(){
   var returnDate=c.rental&&c.rental.return?new Date(c.rental.return).toLocaleDateString('da-DK'):'';
 
   var msg='Hej '+driverName+',\n\n'
-    +'Her er din udlejningskontrakt:\n'
+    +'Her er din udlejningskontrakt fra Trust Move Udlejning:\n'
     +'📋 Kontrakt: '+contractNum+'\n'
     +'🚐 Bil: '+vehicleInfo+'\n'
     +'📅 Periode: '+pickupDate+' → '+returnDate+'\n\n'
-    +'Med venlig hilsen';
+    +'Med venlig hilsen,\nTrust Move Udlejning';
 
-  // Prøv først at generere PDF og dele via Web Share API (mobil)
-  var pdfShared=false;
+  showToast('Genererer PDF...','success');
+
   try{
-    if(window.jspdf && typeof html2canvas==='function'){
-      showToast('Genererer PDF...','success');
-      var jsPDF=window.jspdf.jsPDF;
-      var contractEl=document.querySelector('.contract-print-area')||createTempContractEl(c);
-      var canvas=await html2canvas(contractEl,{scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false});
-      var imgData=canvas.toDataURL('image/jpeg',0.92);
-      var pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
-      var pdfW=pdf.internal.pageSize.getWidth();
-      var pdfH=(canvas.height*pdfW)/canvas.width;
-      var pageH=pdf.internal.pageSize.getHeight();
-      var yPos=0;
-      while(yPos<pdfH){
-        if(yPos>0)pdf.addPage();
-        pdf.addImage(imgData,'JPEG',0,-yPos,pdfW,pdfH);
-        yPos+=pageH;
-      }
-      var pdfBlob=pdf.output('blob');
-      var pdfFile=new File([pdfBlob],'Kontrakt-'+contractNum+'.pdf',{type:'application/pdf'});
+    // Generate PDF
+    var pdfBlob = await generateContractPDF(c, contractNum);
+    var pdfFile = new File([pdfBlob], 'Kontrakt-'+contractNum+'.pdf', {type:'application/pdf'});
 
-      // Prøv Web Share API med fil (fungerer på mobil)
-      if(navigator.canShare && navigator.canShare({files:[pdfFile]})){
+    // Try Web Share API (works on mobile Chrome/Safari - can share directly to WhatsApp)
+    if(navigator.canShare && navigator.canShare({files:[pdfFile]})){
+      try{
         await navigator.share({
           files:[pdfFile],
           title:'Udlejningskontrakt '+contractNum,
           text:msg
         });
-        pdfShared=true;
-      } else {
-        // Download PDF og åbn WhatsApp separat
-        var url=URL.createObjectURL(pdfFile);
-        var a=document.createElement('a');a.href=url;a.download='Kontrakt-'+contractNum+'.pdf';
-        document.body.appendChild(a);a.click();document.body.removeChild(a);
-        setTimeout(function(){URL.revokeObjectURL(url);},10000);
-        showToast('PDF downloadet — åbner WhatsApp...','success');
+        showToast('Kontrakt delt ✅','success');
+        return;
+      }catch(shareErr){
+        if(shareErr.name!=='AbortError') console.warn('Share API fejl:',shareErr);
+        // User cancelled or error - fall through to WA link
       }
     }
-  }catch(err){
-    console.warn('WhatsApp PDF fejl (bruger fallback):',err);
-  }
 
-  // Åbn WhatsApp med besked (hvis PDF ikke blev delt via Web Share)
-  if(!pdfShared){
+    // Desktop/browser without share API:
+    // Auto-download PDF AND open WhatsApp with message
+    var url=URL.createObjectURL(pdfBlob);
+    var a=document.createElement('a');
+    a.href=url; a.download='Kontrakt-'+contractNum+'.pdf';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 15000);
+
+    // Open WhatsApp after short delay so download starts first
+    setTimeout(function(){
+      var waMsg=encodeURIComponent(msg+'\n\n(Vedhæft PDF-filen der lige er downloadet)');
+      var waUrl=phone?'https://wa.me/'+phone+'?text='+waMsg:'https://wa.me/?text='+waMsg;
+      window.open(waUrl,'_blank');
+      showToast('PDF downloadet — vedhæft den i WhatsApp','success');
+    }, 800);
+
+  }catch(err){
+    console.warn('WhatsApp PDF fejl:',err);
+    // Pure text fallback
     var waMsg=encodeURIComponent(msg);
     var waUrl=phone?'https://wa.me/'+phone+'?text='+waMsg:'https://wa.me/?text='+waMsg;
-    var waWin=window.open(waUrl,'_blank');
-    // Fallback hvis popup blev blokeret
-    if(!waWin){
-      window.location.href=waUrl;
-    }
-    showToast('WhatsApp åbnet','success');
+    window.open(waUrl,'_blank');
+    showToast('WhatsApp åbnet (ingen PDF - tjek jsPDF CDN)','success');
   }
 }
 function createTempContractEl(c){
