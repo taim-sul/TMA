@@ -874,15 +874,12 @@ function initDefaults(){
   if(!STORE.get('users')){
     setData('users',[{id:'1',username:'admin',name:'Administrator',password:'TMA123',role:'admin'}]);
   } else {
-    // Migration: if admin user has a legacy/unknown password, reset to TMA123
-    // This handles old sessions from previous versions
     const users = getData('users');
-    const admin = users.find(u=>u.username==='admin');
-    const knownLegacyPasswords = ['pilot2024','Pilot2024','pilot','admin','1234','12345'];
+    const admin = users.find(u=>u.username.toLowerCase()==='admin');
+    const knownLegacyPasswords = ['pilot2024','Pilot2024','pilot','admin','1234','12345','TMA123'];
     if(admin && knownLegacyPasswords.includes(admin.password)){
       admin.password = 'TMA123';
       setData('users', users);
-      console.log('[TML] Admin adgangskode nulstillet til standard: TMA123');
     }
   }
   if(!STORE.get('settings')) setData('settings',{name:'Trust Move Udlejning',cvr:'',addr:'',city:'',phone:'',email:'',gebyr:'500'});
@@ -963,7 +960,8 @@ function doLogin(){
   const p=document.getElementById('loginPass').value;
   const user=getData('users').find(x=>x.username.toLowerCase()===u.toLowerCase()&&x.password===p);
   if(!user){document.getElementById('loginErr').style.display='block';return;}
-  localStorage.setItem('pua_session',JSON.stringify({username:user.username,token:_hashSession(u,p)}));
+  // Gem session med lowercase brugernavn og korrekt hash
+  localStorage.setItem('pua_session',JSON.stringify({username:user.username,token:_hashSession(user.username.toLowerCase(),p)}));
   activateApp(user);
 }
 function doLogout(){
@@ -980,8 +978,12 @@ function tryAutoLogin(){
   try{
     const sess=JSON.parse(localStorage.getItem('pua_session'));
     if(!sess) return false;
-    const user=getData('users').find(x=>x.username.toLowerCase()===sess.username.toLowerCase()&&_hashSession(x.username,x.password)===sess.token);
+    const user=getData('users').find(x=>x.username.toLowerCase()===sess.username.toLowerCase());
     if(!user){localStorage.removeItem('pua_session');return false;}
+    // Verificer token med lowercase brugernavn
+    if(_hashSession(user.username.toLowerCase(),user.password)!==sess.token){
+      localStorage.removeItem('pua_session');return false;
+    }
     activateApp(user); return true;
   }catch{return false;}
 }
@@ -1608,10 +1610,11 @@ async function shareContractPDF(c){
   showToast('Genererer PDF...','success');
   try{
     var pdfBlob = await generateContractPDF(c, contractNum);
-    var pdfFile = new File([pdfBlob], 'Kontrakt-'+contractNum+'.pdf', {type:'application/pdf'});
+    var fileName = 'Kontrakt-'+contractNum+'.pdf';
+    var pdfFile = new File([pdfBlob], fileName, {type:'application/pdf'});
 
-    // Native share sheet (Android, iOS) — bruger vælger selv WhatsApp, Gmail, Bluetooth osv.
-    if(navigator.canShare && navigator.canShare({files:[pdfFile]})){
+    // Native share sheet — Android/iOS åbner valgmenu (WhatsApp, Gmail, Bluetooth osv.)
+    if(navigator.share && navigator.canShare && navigator.canShare({files:[pdfFile]})){
       try{
         await navigator.share({files:[pdfFile], title:'Udlejningskontrakt '+contractNum});
         showToast('Kontrakt delt ✅','success');
@@ -1622,16 +1625,16 @@ async function shareContractPDF(c){
       }
     }
 
-    // Desktop / browser uden share API → download direkte
-    var url=URL.createObjectURL(pdfBlob);
-    var a=document.createElement('a');
-    a.href=url; a.download='Kontrakt-'+contractNum+'.pdf';
+    // Fallback: download PDF direkte
+    var url = URL.createObjectURL(pdfBlob);
+    var a = document.createElement('a');
+    a.href=url; a.download=fileName;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(()=>URL.revokeObjectURL(url), 15000);
     showToast('PDF downloadet ✅','success');
 
   }catch(err){
-    showToast('Fejl ved PDF-generering: '+err.message,'error');
+    showToast('Fejl: '+err.message,'error');
     console.error('shareContractPDF fejl:',err);
   }
 }
@@ -2477,4 +2480,4 @@ function parseExcelFile(file){
 </script>
 <div id="btPrintArea"></div>
 </body>
-  </html>
+</html>
