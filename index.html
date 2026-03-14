@@ -396,7 +396,6 @@ tr:hover td{background:var(--bg3);}
       </div>
     </div>
   </div>
-  <div style="color:var(--text3);font-size:.75rem;margin-top:20px;">Standard login: <b style="color:var(--accent)">admin</b> / <b style="color:var(--accent)">TMA123</b></div>
 </div>
 
 <!-- APP -->
@@ -404,6 +403,7 @@ tr:hover td{background:var(--bg3);}
   <div class="topbar">
     <div class="topbar-logo">TRUST MOVE UDLEJNING</div>
     <div class="topbar-user">Logget ind som: <span id="currentUserLabel"></span></div>
+    <span style="font-size:.7rem;color:var(--text3);margin-right:10px;letter-spacing:.5px">v3.1</span>
     <button id="pwaInstallBtn" class="btn btn-accent btn-sm" onclick="installPWA()" style="display:none">📲 Installér app</button>
     <button class="btn btn-ghost btn-sm" onclick="doLogout()">Log ud</button>
   </div>
@@ -601,7 +601,7 @@ tr:hover td{background:var(--bg3);}
       <div class="flex gap-8 mt-16" style="flex-wrap:wrap">
         <button class="btn btn-blue" onclick="printContract()">🖨️ Print</button>
         <button class="btn btn-green" onclick="emailContract()">📧 Send på mail</button>
-        <button class="btn" style="background:#25D366;color:#fff" onclick="whatsappContract()">💬 Send via WhatsApp</button>
+        <button class="btn btn-accent" onclick="shareContractPDF()">📤 Del kontrakt (PDF)</button>
         <button class="btn btn-ghost" onclick="exportContract()">⬇️ Eksporter JSON</button>
         <button class="btn btn-accent" onclick="resetWizard()">+ Ny Kontrakt</button>
       </div>
@@ -845,7 +845,7 @@ tr:hover td{background:var(--bg3);}
     <div class="modal-actions flex" style="flex-wrap:wrap;gap:8px">
       <button class="btn btn-blue btn-sm" onclick="printContractById()">🖨️ Print</button>
       <button class="btn btn-green btn-sm" onclick="emailContractById()">📧 Send mail</button>
-      <button class="btn btn-sm" style="background:#25D366;color:#fff" onclick="whatsappContractById()">💬 WhatsApp</button>
+      <button class="btn btn-accent btn-sm" onclick="shareContractById()">📤 Del PDF</button>
       <button class="btn btn-red btn-sm" id="returnBtn" onclick="returnVehicle()">✅ Afslut/Aflever</button>
       <button class="btn btn-ghost btn-sm" onclick="closeModal('contractDetailModal')">Luk</button>
     </div>
@@ -905,6 +905,8 @@ function activateApp(user){
   if(user.role==='admin') document.querySelectorAll('.admin-only').forEach(el=>el.style.display='');
   loadSettings(); renderDashboard(); renderVehicles(); renderContracts();
   renderDrivers(); populateDriverSelect(); populateVehicleSelect();
+  // Set initial history state so back button navigates within app
+  history.replaceState({page:'dashboard'}, '', '#dashboard');
 }
 function _hashSession(u,p){
   // Simpel hash — ikke kryptografisk sikker, men bedre end klartekst
@@ -944,7 +946,7 @@ function doResetPassword(){
   if(master !== MASTER_KEY){ errEl.textContent='Forkert master-nøgle.'; errEl.style.display='block'; return; }
 
   var users = getData('users');
-  var idx = users.findIndex(u => u.username === username);
+  var idx = users.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
   if(idx === -1){ errEl.textContent='Bruger ikke fundet.'; errEl.style.display='block'; return; }
 
   users[idx].password = pass1;
@@ -959,7 +961,7 @@ function doResetPassword(){
 function doLogin(){
   const u=document.getElementById('loginUser').value.trim();
   const p=document.getElementById('loginPass').value;
-  const user=getData('users').find(x=>x.username===u&&x.password===p);
+  const user=getData('users').find(x=>x.username.toLowerCase()===u.toLowerCase()&&x.password===p);
   if(!user){document.getElementById('loginErr').style.display='block';return;}
   localStorage.setItem('pua_session',JSON.stringify({username:user.username,token:_hashSession(u,p)}));
   activateApp(user);
@@ -972,12 +974,13 @@ function doLogout(){
   document.getElementById('loginUser').value='';
   document.getElementById('loginPass').value='';
   document.getElementById('loginErr').style.display='none';
+  history.replaceState(null,'','');
 }
 function tryAutoLogin(){
   try{
     const sess=JSON.parse(localStorage.getItem('pua_session'));
     if(!sess) return false;
-    const user=getData('users').find(x=>x.username===sess.username&&_hashSession(x.username,x.password)===sess.token);
+    const user=getData('users').find(x=>x.username.toLowerCase()===sess.username.toLowerCase()&&_hashSession(x.username,x.password)===sess.token);
     if(!user){localStorage.removeItem('pua_session');return false;}
     activateApp(user); return true;
   }catch{return false;}
@@ -986,18 +989,42 @@ function tryAutoLogin(){
 // ════════════════════════════════════════════════
 //  NAV
 // ════════════════════════════════════════════════
-function showPage(id,el){
+function showPage(id, el, pushState){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('page-'+id).classList.add('active');
   if(el) el.classList.add('active');
+  else {
+    // Find and activate the matching nav-item
+    document.querySelectorAll('.nav-item').forEach(n=>{
+      if(n.getAttribute('onclick')&&n.getAttribute('onclick').includes("'"+id+"'")) n.classList.add('active');
+    });
+  }
   if(id==='dashboard') renderDashboard();
   if(id==='contracts') renderContracts();
   if(id==='vehicles') renderVehicles();
   if(id==='drivers') renderDrivers();
   if(id==='users') renderUsers();
   if(id==='settings') loadFbConfigUI();
+
+  // Push to browser history so Android back button works
+  if(pushState !== false && currentUser){
+    history.pushState({page: id}, '', '#'+id);
+  }
 }
+
+// Android/browser back button — navigate within app
+window.addEventListener('popstate', function(e){
+  if(!currentUser){
+    // Not logged in — ensure login screen is shown
+    history.replaceState(null,'','');
+    document.getElementById('app').style.display='none';
+    document.getElementById('loginScreen').style.display='flex';
+    return;
+  }
+  var page = (e.state && e.state.page) ? e.state.page : 'dashboard';
+  showPage(page, null, false);
+});
 
 // ════════════════════════════════════════════════
 //  LEJER TYPE
@@ -1574,71 +1601,38 @@ async function generateContractPDF(c, contractNum){
 }
 
 
-async function whatsappContract(){
-  var c=currentContractData;
-  if(!c||!c.driver){showToast('Ingen kontrakt at sende','error');return;}
-
-  var phone=(c.driver.phone||'').replace(/\D/g,'');
-  if(phone && phone.length<=8) phone='45'+phone;
-  var contractNum=c.num||'';
-  var driverName=c.driver.name||'';
-  var vehicleInfo=(c.vehicle?c.vehicle.brand+' '+c.vehicle.model+' ('+c.vehicle.reg+')':'Bil');
-  var pickupDate=c.rental&&c.rental.pickup?new Date(c.rental.pickup).toLocaleDateString('da-DK'):'';
-  var returnDate=c.rental&&c.rental.return?new Date(c.rental.return).toLocaleDateString('da-DK'):'';
-
-  var msg='Hej '+driverName+',\n\n'
-    +'Her er din udlejningskontrakt fra Trust Move Udlejning:\n'
-    +'📋 Kontrakt: '+contractNum+'\n'
-    +'🚐 Bil: '+vehicleInfo+'\n'
-    +'📅 Periode: '+pickupDate+' → '+returnDate+'\n\n'
-    +'Med venlig hilsen,\nTrust Move Udlejning';
-
+async function shareContractPDF(c){
+  c = c || currentContractData;
+  if(!c||!c.driver){showToast('Ingen kontrakt at dele','error');return;}
+  var contractNum=c.num||'kontrakt';
   showToast('Genererer PDF...','success');
-
   try{
-    // Generate PDF
     var pdfBlob = await generateContractPDF(c, contractNum);
     var pdfFile = new File([pdfBlob], 'Kontrakt-'+contractNum+'.pdf', {type:'application/pdf'});
 
-    // Try Web Share API (works on mobile Chrome/Safari - can share directly to WhatsApp)
+    // Native share sheet (Android, iOS) — bruger vælger selv WhatsApp, Gmail, Bluetooth osv.
     if(navigator.canShare && navigator.canShare({files:[pdfFile]})){
       try{
-        await navigator.share({
-          files:[pdfFile],
-          title:'Udlejningskontrakt '+contractNum,
-          text:msg
-        });
+        await navigator.share({files:[pdfFile], title:'Udlejningskontrakt '+contractNum});
         showToast('Kontrakt delt ✅','success');
         return;
       }catch(shareErr){
-        if(shareErr.name!=='AbortError') console.warn('Share API fejl:',shareErr);
-        // User cancelled or error - fall through to WA link
+        if(shareErr.name==='AbortError') return; // Bruger annullerede — gør ingenting
+        console.warn('Share API fejl:',shareErr);
       }
     }
 
-    // Desktop/browser without share API:
-    // Auto-download PDF AND open WhatsApp with message
+    // Desktop / browser uden share API → download direkte
     var url=URL.createObjectURL(pdfBlob);
     var a=document.createElement('a');
     a.href=url; a.download='Kontrakt-'+contractNum+'.pdf';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(()=>URL.revokeObjectURL(url), 15000);
-
-    // Open WhatsApp after short delay so download starts first
-    setTimeout(function(){
-      var waMsg=encodeURIComponent(msg+'\n\n(Vedhæft PDF-filen der lige er downloadet)');
-      var waUrl=phone?'https://wa.me/'+phone+'?text='+waMsg:'https://wa.me/?text='+waMsg;
-      window.open(waUrl,'_blank');
-      showToast('PDF downloadet — vedhæft den i WhatsApp','success');
-    }, 800);
+    showToast('PDF downloadet ✅','success');
 
   }catch(err){
-    console.warn('WhatsApp PDF fejl:',err);
-    // Pure text fallback
-    var waMsg=encodeURIComponent(msg);
-    var waUrl=phone?'https://wa.me/'+phone+'?text='+waMsg:'https://wa.me/?text='+waMsg;
-    window.open(waUrl,'_blank');
-    showToast('WhatsApp åbnet (ingen PDF - tjek jsPDF CDN)','success');
+    showToast('Fejl ved PDF-generering: '+err.message,'error');
+    console.error('shareContractPDF fejl:',err);
   }
 }
 function createTempContractEl(c){
@@ -1649,9 +1643,9 @@ function createTempContractEl(c){
   setTimeout(()=>document.body.removeChild(div),5000);
   return div;
 }
-function whatsappContractById(){
+function shareContractById(){
   const c=getData('contracts').find(x=>x.id===currentContractId);
-  if(c){currentContractData=c;whatsappContract();}
+  if(c){currentContractData=c;shareContractPDF(c);}
 }
 function exportContract(){dlJSON(currentContractData,'kontrakt-'+currentContractData.num+'.json');}
 
@@ -2175,7 +2169,7 @@ function showToast(msg,type=''){
 
 
 // ════════════════════════════════════════════════
-//  INIT
+//  INIT — auto-login hvis session findes
 // ════════════════════════════════════════════════
 (function(){
   var loggedIn = false;
@@ -2483,4 +2477,4 @@ function parseExcelFile(file){
 </script>
 <div id="btPrintArea"></div>
 </body>
-</html>
+  </html>
